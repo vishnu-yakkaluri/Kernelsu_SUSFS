@@ -72,12 +72,83 @@ jobs:
           CONFIG_KSU_SUSFS_SUS_SU=y
           EOF
 
-          # Remove check_defconfig
+name: Release
+
+on:
+  push:
+    paths:
+      - ".github/workflows/main.yml"
+  workflow_dispatch:
+
+jobs:
+  build-kernel:
+    name: Build
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        include:
+          - android: "android15"
+            kernel: "6.6"
+
+    steps:
+      - name: Initialize and Sync Kernel Source
+        run: |
+          sudo apt update -y && sudo apt install -y repo
+          repo init --depth 1 -u https://android.googlesource.com/kernel/manifest -b common-${{ matrix.android }}-${{ matrix.kernel }}
+          repo sync -c --force-sync --optimized-fetch --no-tags --no-clone-bundle --prune -j$(nproc --all)
+
+      - name: Add KernelSU
+        working-directory: common
+        run: curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v1.0.5
+
+      - name: Checkout SUSFS
+        run: |
+          git clone https://gitlab.com/simonpunk/susfs4ksu -b gki-${{ matrix.android }}-${{ matrix.kernel }}
+          cd susfs4ksu
+
+          case "${{ matrix.android }}-${{ matrix.kernel }}" in
+            "android15-6.6")
+              susfs_commit="0ed9845a3f6ed624d55484384f2b414a7527fc3b"
+            ;;
+          esac
+
+          git checkout ${susfs_commit}
+
+      - name: Apply SUSFS Patches
+        working-directory: common
+        run: |
+          cp ../susfs4ksu/kernel_patches/fs/* fs
+          cp ../susfs4ksu/kernel_patches/include/linux/* include/linux
+          patch -p1 < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ matrix.android }}-${{ matrix.kernel }}.patch
+          cd KernelSU
+          patch -p1 < ../../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
+
+      - name: Add Configuration
+        run: |
+          cat << EOF >> common/arch/arm64/configs/gki_defconfig
+          CONFIG_KSU=y
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=n
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_ENABLE_LOG=y
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+          CONFIG_KSU_SUSFS_SUS_SU=y
+          EOF
+
           sed -i 's|check_defconfig||g' common/build.config.gki
 
       - name: Make working directory clean to avoid dirty
         run: |
-          # Fix bazel build error
           if [ -f common/BUILD.bazel ]; then
             [ -f android/abi_gki_protected_exports_aarch64 ] || sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' common/BUILD.bazel
           fi
@@ -85,14 +156,49 @@ jobs:
           rm common/android/abi_gki_protected_exports_* || echo "No protected exports!"
           git config --global user.name "${{ github.actor }}"
           git config --global user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
-          cd common && git add -A && git commit -a -m "Add KernelSU and SUSFS"
+          cd common && git add -A && git commit -a -m "Add KernelSU and SUSFS" || echo "Nothing to commit"
 
-      - name: Set Kernel Name
-        if: '${{ matrix.android }}-${{ matrix.kernel }} != "android15-6.6"'
-        run: sed -i '$s|$res|${{ matrix.android }}$res|g' common/scripts/setlocalversion
+      - name: Set Custom Kernel Version
+        run: echo "shazam" > common/localversion
 
-      - name: Add custom local version tag
+      # Removed: Set Kernel Name (that added random git info)
+      # Removed:
+      # - name: Set Kernel Name
+      #   if: '${{ matrix.android }}-${{ matrix.kernel }} != "android15-6.6"'
+      #   run: sed -i '$s|$res|${{ matrix.android }}$res|g' common/scripts/setlocalversion
+
+      - name: Build Kernel
         run: |
+          if [ -e build/build.sh ]; then
+            LTO=thin BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh || exit 1
+          else
+            tools/bazel run --disk_cache=/home/runner/.cache/bazel --config=fast --config=stamp --lto=thin //common:kernel_aarch64_dist -- --dist_dir="out/${{ matrix.android }}-${{ matrix.kernel }}/dist" || exit 1
+          fi
+
+      - name: Copy Boot Images
+        run: |
+          mkdir artifacts && cd artifacts
+          if [ "${{ matrix.android }}-${{ matrix.kernel }}" == "android12-5.10" ]; then
+            ls -R ../out
+          else
+            cp ../out/${{ matrix.android }}-${{ matrix.kernel }}/dist/boot.img ${{ matrix.android }}-${{ matrix.kernel }}_boot.img
+            cp ../out/${{ matrix.android }}-${{ matrix.kernel }}/dist/boot-gz.img ${{ matrix.android }}-${{ matrix.kernel }}_boot-gz.img
+            cp ../out/${{ matrix.android }}-${{ matrix.kernel }}/dist/boot-lz4.img ${{ matrix.android }}-${{ matrix.kernel }}_boot-lz4.img
+          fi
+
+      - name: Make AnyKernel3 Zip
+        run: |
+          git clone https://github.com/Kernel-SU/AnyKernel3.git && cd AnyKernel3
+          rm -rf .git
+          sed -i 's|^kernel\.string=.*|kernel.string=KernelSU SUSFS by Shazam|' anykernel.sh
+          cp ../out/${{ matrix.android }}-${{ matrix.kernel }}/dist/Image .
+          zip -r ../artifacts/${{ matrix.android }}-${{ matrix.kernel }}-AnyKernel3.zip .
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@main
+        with:
+          name: ${{ matrix.android }}-${{ matrix.kernel }}
+          path: artifactsun: |
           echo 'CONFIG_LOCALVERSION="-shazam"' >> common/arch/arm64/configs/gki_fragment.config
           sed -i '/^KERNEL_DIR=/a KERNEL_CONFIG_FRAGMENT=common/arch/arm64/configs/gki_fragment.config' common/build.config.gki.aarch64
 
