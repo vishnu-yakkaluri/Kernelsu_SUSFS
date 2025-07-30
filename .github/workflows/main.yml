@@ -1,4 +1,4 @@
-name: Build Motorola GKI 6.6.50 Kernel with KernelSU + SUSFS
+name: Release
 
 on:
   push:
@@ -11,71 +11,115 @@ jobs:
     name: Build
     runs-on: ubuntu-latest
 
-    steps:
-      - name: Checkout Kernel Source
-        uses: actions/checkout@v4
-        with:
-          repository: MotorolaMobilityLLC/kernel-mtk
-          ref: MMI-V1TL35.73-60-3
+    strategy:
+      matrix:
+        include:
+          - android: "android15"
+            kernel: "6.6"
 
-      - name: Setup Environment
+    steps:
+      - name: Initialize and Sync Kernel Source
         run: |
-          sudo apt update && sudo apt install -y bc bison build-essential cpio curl flex gcc git libssl-dev libncurses-dev libelf-dev python3 unzip xz-utils
+          sudo apt update -y && sudo apt install -y repo
+          repo init --depth 1 -u https://android.googlesource.com/kernel/manifest -b common-${{ matrix.android }}-${{ matrix.kernel }}
+          repo sync -c --force-sync --optimized-fetch --no-tags --no-clone-bundle --prune -j$(nproc --all)
+
+      - name: Spoof Kernel Uname as 'shazam'
+        run: |
+          sed -i 's/^EXTRAVERSION.*/EXTRAVERSION = -shazam/' common/Makefile
 
       - name: Add KernelSU
-        run: |
-          git clone https://github.com/tiann/KernelSU
-          cd KernelSU
-          bash ./kernel/setup.sh ../
+        working-directory: common
+        run: curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v1.0.5
 
       - name: Checkout SUSFS
         run: |
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git
+          git clone https://gitlab.com/simonpunk/susfs4ksu -b gki-${{ matrix.android }}-${{ matrix.kernel }}
           cd susfs4ksu
-          git checkout gki-android15-6.6
+
+          case "${{ matrix.android }}-${{ matrix.kernel }}" in
+            "android15-6.6")
+              susfs_commit="0ed9845a3f6ed624d55484384f2b414a7527fc3b"
+            ;;
+          esac
+
+          git checkout ${susfs_commit}
 
       - name: Apply SUSFS Patches
+        working-directory: common
         run: |
-          cp susfs4ksu/kernel_patches/fs/* fs/
-          cp susfs4ksu/kernel_patches/include/linux/* include/linux/
-          patch -p1 < susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch
+          cp ../susfs4ksu/kernel_patches/fs/* fs
+          cp ../susfs4ksu/kernel_patches/include/linux/* include/linux
+          patch -p1 < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ matrix.android }}-${{ matrix.kernel }}.patch
           cd KernelSU
-          patch -p1 < ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
+          patch -p1 < ../../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
 
-      - name: Update Config and Spoof uname
+      - name: Add Configuration
         run: |
-          echo "CONFIG_KSU=y" >> arch/arm64/configs/vendor/k62v_haydn_defconfig
-          echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/vendor/k62v_haydn_defconfig
-          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> arch/arm64/configs/vendor/k62v_haydn_defconfig
-          echo "CONFIG_UNAME_RELEASE=\"shazam\"" >> arch/arm64/configs/vendor/k62v_haydn_defconfig
-          sed -i 's|EXTRAVERSION.*|EXTRAVERSION = -shazam|' Makefile
+          cat << EOF >> common/arch/arm64/configs/gki_defconfig
+          # KernelSU and SUSFS Config
+          CONFIG_KSU=y
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=n
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_ENABLE_LOG=y
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+          CONFIG_KSU_SUSFS_SUS_SU=y
+          EOF
+
+          # Remove check_defconfig
+          sed -i 's|check_defconfig||g' common/build.config.gki
+
+      - name: Fix Kernel Name
+        run: |
+          # Fix bazel build error
+          if [ -f common/BUILD.bazel ]; then
+            [ -f android/abi_gki_protected_exports_aarch64 ] || sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' common/BUILD.bazel
+          fi
+
+          sed -i 's| -dirty||g' common/scripts/setlocalversion
+          rm common/android/abi_gki_protected_exports_* || echo "No protected exports!"
+
+          if [ "${{ matrix.android }}-${{ matrix.kernel }}" != "android15-6.6" ]; then
+            sed -i '$s|$res|${{ matrix.android }}$res|g' common/scripts/setlocalversion
+          fi
 
       - name: Build Kernel
         run: |
-          export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          make vendor/k62v_haydn_defconfig
-          make -j$(nproc)
+          if [ -e build/build.sh ]; then
+            LTO=thin BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh || exit 1
+          else
+            tools/bazel run --disk_cache=/home/runner/.cache/bazel --config=fast --config=stamp --lto=thin //common:kernel_aarch64_dist -- --dist_dir="out/${{ matrix.android }}-${{ matrix.kernel }}/dist" || exit 1
+          fi
 
-      - name: Upload zImage and dtb
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-output
-          path: |
-            arch/arm64/boot/Image
-            arch/arm64/boot/dts
-
-      - name: Make AnyKernel3 Flashable Zip
+      - name: Copy Boot Images
         run: |
-          git clone https://github.com/Kernel-SU/AnyKernel3
-          cd AnyKernel3
-          rm -rf .git
-          sed -i 's|^kernel\.string=.*|kernel.string=KernelSU SUSFS by Shazam|' anykernel.sh
-          cp ../arch/arm64/boot/Image .
-          zip -r9 ../kernel-susfs-shazam.zip .
+          mkdir artifacts && cd artifacts
+          if [ "${{ matrix.android }}-${{ matrix.kernel }}" != "android12-5.10" ]; then
+            cp ../out/${{ matrix.android }}-${{ matrix.kernel }}/dist/boot.img ${{ matrix.android }}-${{ matrix.kernel }}_boot.img
+            cp ../out/${{ matrix.android }}-${{ matrix.kernel }}/dist/boot-gz.img ${{ matrix.android }}-${{ matrix.kernel }}_boot-gz.img
+            cp ../out/${{ matrix.android }}-${{ matrix.kernel }}/dist/boot-lz4.img ${{ matrix.android }}-${{ matrix.kernel }}_boot-lz4.img
+          fi
 
-      - name: Upload Flashable Zip
-        uses: actions/upload-artifact@v4
+      - name: Make AnyKernel3 Zip
+        run: |
+          git clone https://github.com/Kernel-SU/AnyKernel3.git && cd AnyKernel3
+          rm -rf .git
+          sed -i 's|^kernel\.string=.*|kernel.string=KernelSU SUSFS by SomeEmptyBox|' anykernel.sh
+          cp ../out/${{ matrix.android }}-${{ matrix.kernel }}/dist/Image . 2>/dev/null || echo "No Image file!"
+          zip -r ../artifacts/${{ matrix.android }}-${{ matrix.kernel }}-AnyKernel3.zip .
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@main
         with:
-          name: flashable-zip
-          path: kernel-susfs-shazam.zip
+          name: ${{ matrix.android }}-${{ matrix.kernel }}
+          path: artifacts
