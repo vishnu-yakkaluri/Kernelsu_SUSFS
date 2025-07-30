@@ -42,45 +42,48 @@ jobs:
       - name: Apply SUSFS Patches
         working-directory: common
         run: |
-          cp -r ../susfs4ksu/kernel_patches/fs/* fs/
-          cp -r ../susfs4ksu/kernel_patches/include/linux/* include/linux/
+          cp ../susfs4ksu/kernel_patches/fs/* fs
+          cp ../susfs4ksu/kernel_patches/include/linux/* include/linux
           patch -p1 < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ matrix.android }}-${{ matrix.kernel }}.patch
           cd KernelSU
           patch -p1 < ../../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
 
-      - name: Add Configuration
+      - name: Add KernelSU and SUSFS Configuration
+        working-directory: common
         run: |
-          cd common
+          cp arch/arm64/configs/gki_defconfig .config
+          make ARCH=arm64 olddefconfig
 
-          cat <<EOF >> arch/arm64/configs/gki_defconfig
-          # KernelSU and SUSFS Config
-            CONFIG_KSU=y
-            CONFIG_KSU_SUSFS=y
-            CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=n
-            CONFIG_KSU_SUSFS_SUS_PATH=y
-            CONFIG_KSU_SUSFS_SUS_MOUNT=y
-            CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
-            CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
-            CONFIG_KSU_SUSFS_KSTAT=y
-            CONFIG_KSU_SUSFS_TRY_UMOUNT=y
-            CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
-            CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-            CONFIG_KSU_SUSFS_ENABLE_LOG=y
-            CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
-            CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
-           CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-           CONFIG_KSU_SUSFS_SUS_SU=y
-           EOF
+          ./scripts/config --file .config \
+            --enable CONFIG_KSU \
+            --enable CONFIG_KSU_SUSFS \
+            --disable CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT \
+            --enable CONFIG_KSU_SUSFS_SUS_PATH \
+            --enable CONFIG_KSU_SUSFS_SUS_MOUNT \
+            --enable CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT \
+            --enable CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
+            --enable CONFIG_KSU_SUSFS_KSTAT \
+            --enable CONFIG_KSU_SUSFS_TRY_UMOUNT \
+            --enable CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT \
+            --enable CONFIG_KSU_SUSFS_SPOOF_UNAME \
+            --enable CONFIG_KSU_SUSFS_ENABLE_LOG \
+            --enable CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+            --enable CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+            --enable CONFIG_KSU_SUSFS_OPEN_REDIRECT \
+            --enable CONFIG_KSU_SUSFS_SUS_SU
 
+          make ARCH=arm64 savedefconfig
+          mv defconfig arch/arm64/configs/gki_defconfig
+
+          # Remove defconfig check and set EXTRAVERSION
           sed -i 's|check_defconfig||g' build.config.gki
-          echo 'EXTRAVERSION := -Shazam' >> build.config.gki
+          echo 'EXTRAVERSION := -shazam' >> build.config.gki
 
       - name: Clean Working Directory
         run: |
           if [ -f common/BUILD.bazel ]; then
             [ -f android/abi_gki_protected_exports_aarch64 ] || sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' common/BUILD.bazel
           fi
-
           rm common/android/abi_gki_protected_exports_* || echo "No protected exports!"
           git config --global user.name "${{ github.actor }}"
           git config --global user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
