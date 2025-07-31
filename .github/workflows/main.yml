@@ -93,17 +93,6 @@ jobs:
             sed -i '$s|$res|${{ matrix.android }}$res|g' common/scripts/setlocalversion
           fi
 
-          - name: Set Custom Kernel Uname and Version
-          working-directory: common
-          run: |
-           sed -i 's/^VERSION =.*/VERSION = 6/' Makefile
-           sed -i 's/^PATCHLEVEL =.*/PATCHLEVEL = 6/' Makefile
-           sed -i 's/^SUBLEVEL =.*/SUBLEVEL = 50/' Makefile
-
-          sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION = ${{ env.CUSTOM_UNAME_FULL }}/' Makefile
-          if ! grep -q '^EXTRAVERSION =' Makefile; then
-            sed -i '/^SUBLEVEL =/aEXTRAVERSION = ${{ env.CUSTOM_UNAME_FULL }}' Makefile
-
       - name: Build Kernel
         run: |
           if [ -e build/build.sh ]; then
