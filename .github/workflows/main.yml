@@ -114,7 +114,7 @@ jobs:
         run: |
           git clone https://github.com/Kernel-SU/AnyKernel3.git && cd AnyKernel3
           rm -rf .git
-          sed -i 's|^kernel\.string=.*|kernel.string=KernelSU SUSFS by SomeEmptyBox|' anykernel.sh
+          sed -i 's|^kernel\.string=.*|kernel.string=KernelSU SUSFS by Shazam|' anykernel.sh
           cp ../out/${{ matrix.android }}-${{ matrix.kernel }}/dist/Image . 2>/dev/null || echo "No Image file!"
           zip -r ../artifacts/${{ matrix.android }}-${{ matrix.kernel }}-AnyKernel3.zip .
 
